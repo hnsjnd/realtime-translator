@@ -2,6 +2,7 @@ package com.hnsjnd.realtimetranslator.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.hnsjnd.realtimetranslator.data.AiProviderConfig
@@ -19,17 +20,50 @@ class SettingsRepository(context: Context) {
 
     private val appContext = context.applicationContext
 
-    private val encryptedPrefs: SharedPreferences by lazy {
-        val masterKey = MasterKey.Builder(appContext)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        EncryptedSharedPreferences.create(
-            appContext,
-            "encrypted_ai_prefs",
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
+    private val encryptedPrefs: SharedPreferences by lazy { openSecurePrefs() }
+
+    /**
+     * EncryptedSharedPreferences can throw on some ROMs / after key loss
+     * (AEADBadTagException, KeyStoreException, InvalidProtocolBufferException…).
+     * Try once, then wipe the prefs file + master key and retry, then fall back
+     * to plain private prefs so the app never crash-loops.
+     */
+    private fun openSecurePrefs(): SharedPreferences {
+        fun create(): SharedPreferences {
+            val masterKey = MasterKey.Builder(appContext)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            return EncryptedSharedPreferences.create(
+                appContext,
+                SECURE_FILE,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        }
+        return try {
+            create()
+        } catch (e: Throwable) {
+            Log.e(TAG, "EncryptedSharedPreferences failed, resetting", e)
+            try {
+                appContext.deleteSharedPreferences(SECURE_FILE)
+                java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+                    .deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+            } catch (_: Throwable) {}
+            try {
+                create()
+            } catch (e2: Throwable) {
+                Log.e(TAG, "EncryptedSharedPreferences unavailable, using private prefs", e2)
+                appContext.getSharedPreferences("fallback_ai_prefs", Context.MODE_PRIVATE)
+            }
+        }
+    }
+
+    private fun safeGet(key: String, def: String): String = try {
+        encryptedPrefs.getString(key, def) ?: def
+    } catch (e: Throwable) {
+        Log.e(TAG, "read $key failed", e)
+        def
     }
 
     private val uiPrefs: SharedPreferences =
@@ -58,21 +92,21 @@ class SettingsRepository(context: Context) {
     val audioSource: StateFlow<AudioSource> = _audioSource.asStateFlow()
 
     fun loadConfig(): AiProviderConfig = AiProviderConfig(
-        apiBaseUrl = encryptedPrefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL,
-        apiKey = encryptedPrefs.getString(KEY_API_KEY, "") ?: "",
-        chatModel = encryptedPrefs.getString(KEY_CHAT_MODEL, DEFAULT_CHAT_MODEL) ?: DEFAULT_CHAT_MODEL,
-        asrEndpoint = encryptedPrefs.getString(KEY_ASR_ENDPOINT, "") ?: "",
-        asrModel = encryptedPrefs.getString(KEY_ASR_MODEL, DEFAULT_ASR_MODEL) ?: DEFAULT_ASR_MODEL
+        apiBaseUrl = safeGet(KEY_BASE_URL, DEFAULT_BASE_URL),
+        apiKey = safeGet(KEY_API_KEY, ""),
+        chatModel = safeGet(KEY_CHAT_MODEL, DEFAULT_CHAT_MODEL),
+        asrEndpoint = safeGet(KEY_ASR_ENDPOINT, ""),
+        asrModel = safeGet(KEY_ASR_MODEL, DEFAULT_ASR_MODEL)
     )
 
     fun saveConfig(config: AiProviderConfig) {
-        encryptedPrefs.edit()
+        try { encryptedPrefs.edit()
             .putString(KEY_BASE_URL, config.apiBaseUrl.trim())
             .putString(KEY_API_KEY, config.apiKey.trim())
             .putString(KEY_CHAT_MODEL, config.chatModel.trim())
             .putString(KEY_ASR_ENDPOINT, config.asrEndpoint.trim())
             .putString(KEY_ASR_MODEL, config.asrModel.trim())
-            .apply()
+            .apply() } catch (e: Throwable) { Log.e(TAG, "save failed", e) }
         _config.value = config.copy(
             apiBaseUrl = config.apiBaseUrl.trim(),
             apiKey = config.apiKey.trim(),
@@ -90,15 +124,16 @@ class SettingsRepository(context: Context) {
             .apply()
     }
 
-    fun loadModelCache(baseUrl: String): List<String> {
-        val cachedUrl = uiPrefs.getString(KEY_MODEL_CACHE_URL, null) ?: return emptyList()
-        if (cachedUrl != baseUrl.trim().trimEnd('/')) return emptyList()
-        return try {
-            val arr = org.json.JSONArray(uiPrefs.getString(KEY_MODEL_CACHE_IDS, "[]"))
-            List(arr.length()) { arr.getString(it) }
-        } catch (_: Exception) {
-            emptyList()
+    fun loadModelCache(baseUrl: String): List<String> = try {
+        val cachedUrl = uiPrefs.getString(KEY_MODEL_CACHE_URL, null)
+        if (cachedUrl == null || cachedUrl != baseUrl.trim().trimEnd('/')) emptyList()
+        else {
+            val arr = org.json.JSONArray(uiPrefs.getString(KEY_MODEL_CACHE_IDS, null) ?: "[]")
+            (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }.distinct()
         }
+    } catch (e: Throwable) {
+        Log.e(TAG, "model cache corrupt, ignoring", e)
+        emptyList()
     }
 
     fun setSourceLang(lang: Language) {
@@ -117,6 +152,8 @@ class SettingsRepository(context: Context) {
     }
 
     companion object {
+        private const val TAG = "SettingsRepository"
+        private const val SECURE_FILE = "encrypted_ai_prefs"
         private const val KEY_BASE_URL = "api_base_url"
         private const val KEY_API_KEY = "api_key"
         private const val KEY_CHAT_MODEL = "chat_model"

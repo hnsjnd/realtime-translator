@@ -94,7 +94,8 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(
     config: AiProviderConfig,
     onSave: (AiProviderConfig) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenCrashLog: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val settingsRepo = remember { (context.applicationContext as RealtimeTranslatorApp).settingsRepository }
@@ -461,6 +462,11 @@ fun SettingsScreen(
                     )
                 }
             }
+            Spacer(Modifier.height(12.dp))
+            androidx.compose.material3.TextButton(
+                onClick = onOpenCrashLog,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("查看崩溃日志", color = MaterialTheme.colorScheme.onSurfaceVariant) }
             Spacer(Modifier.height(28.dp))
         }
     }
@@ -501,6 +507,7 @@ private fun ModelPickerField(
     var expanded by remember { mutableStateOf(false) }
     // When true the text is a filter query; after picking an item we show the full list again
     var filtering by remember { mutableStateOf(false) }
+    var hadFocus by remember { mutableStateOf(false) }
     val hasOptions = options.isNotEmpty()
     val query = value.trim()
     val filtered = remember(options, query, filtering) {
@@ -527,7 +534,11 @@ private fun ModelPickerField(
             placeholder = { Text(placeholder) },
             modifier = Modifier
                 .fillMaxWidth()
-                .onFocusChanged { if (!it.isFocused) { expanded = false; filtering = false } },
+                .onFocusChanged {
+                    // Collapse only when focus is really lost, not on the initial unfocused callback
+                    if (it.isFocused) hadFocus = true
+                    else if (hadFocus) { hadFocus = false; expanded = false; filtering = false }
+                },
             enabled = enabled,
             singleLine = true,
             shape = RoundedCornerShape(14.dp),
@@ -607,7 +618,7 @@ private fun ModelPickerField(
 private fun highlight(text: String, query: String, color: androidx.compose.ui.graphics.Color): AnnotatedString {
     if (query.isEmpty()) return AnnotatedString(text)
     val idx = text.indexOf(query, ignoreCase = true)
-    if (idx < 0) return AnnotatedString(text)
+    if (idx < 0 || idx + query.length > text.length) return AnnotatedString(text)
     return buildAnnotatedString {
         append(text.substring(0, idx))
         withStyle(SpanStyle(color = color, fontWeight = FontWeight.Bold)) {

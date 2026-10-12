@@ -12,6 +12,7 @@ class RealtimeTranslatorApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        com.hnsjnd.realtimetranslator.util.CrashLogger.install(this)
         settingsRepository = SettingsRepository(this)
         createNotificationChannel()
     }

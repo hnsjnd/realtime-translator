@@ -21,7 +21,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hnsjnd.realtimetranslator.ui.CrashLogScreen
 import com.hnsjnd.realtimetranslator.ui.MainScreen
+import com.hnsjnd.realtimetranslator.util.CrashLogger
 import com.hnsjnd.realtimetranslator.ui.SettingsScreen
 import com.hnsjnd.realtimetranslator.ui.TranslatorViewModel
 import com.hnsjnd.realtimetranslator.ui.theme.RealtimeTranslatorTheme
@@ -36,7 +38,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             RealtimeTranslatorTheme {
                 val state by viewModel.ui.collectAsStateWithLifecycle()
-                var showSettings by remember { mutableStateOf(false) }
+                var showSettings by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+                var crashLog by remember { mutableStateOf(CrashLogger.read(this@MainActivity)) }
+                var showCrash by remember { mutableStateOf(crashLog != null) }
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
@@ -66,11 +70,25 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                if (showSettings) {
+                if (showCrash && crashLog != null) {
+                    CrashLogScreen(
+                        log = crashLog!!,
+                        onClear = {
+                            CrashLogger.clear(this@MainActivity)
+                            crashLog = null
+                            showCrash = false
+                        },
+                        onClose = { showCrash = false }
+                    )
+                } else if (showSettings) {
                     SettingsScreen(
                         config = state.config,
                         onSave = { viewModel.saveConfig(it) },
-                        onBack = { showSettings = false }
+                        onBack = { showSettings = false },
+                        onOpenCrashLog = {
+                            crashLog = CrashLogger.read(this@MainActivity) ?: "暂无崩溃日志"
+                            showCrash = true
+                        }
                     )
                 } else {
                     MainScreen(
