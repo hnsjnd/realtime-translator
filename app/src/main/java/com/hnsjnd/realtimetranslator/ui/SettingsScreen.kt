@@ -1,5 +1,6 @@
 package com.hnsjnd.realtimetranslator.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,6 +16,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.ModelTraining
@@ -22,14 +24,20 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
@@ -46,12 +54,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.hnsjnd.realtimetranslator.api.ModelsFetchResult
+import com.hnsjnd.realtimetranslator.api.OpenAiModelsClient
 import com.hnsjnd.realtimetranslator.data.AiProviderConfig
 import com.hnsjnd.realtimetranslator.ui.theme.Navy800
 import com.hnsjnd.realtimetranslator.ui.theme.Teal400
@@ -70,9 +81,60 @@ fun SettingsScreen(
     var asrEndpoint by remember(config) { mutableStateOf(config.asrEndpoint) }
     var asrModel by remember(config) { mutableStateOf(config.asrModel) }
     var showKey by remember { mutableStateOf(false) }
+
+    var chatOptions by remember { mutableStateOf(listOf<String>()) }
+    var asrOptions by remember { mutableStateOf(listOf<String>()) }
+    var testing by remember { mutableStateOf(false) }
+    var testError by remember { mutableStateOf<String?>(null) }
+    var testOk by remember { mutableStateOf(false) }
+    var modelsFetched by remember { mutableStateOf(false) }
+
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val bg = MaterialTheme.colorScheme.background
+
+    fun runTestConnection(fromAuto: Boolean = false) {
+        if (testing) return
+        if (baseUrl.isBlank() || apiKey.isBlank()) {
+            if (!fromAuto) {
+                scope.launch { snackbar.showSnackbar("请先填写 Base URL 与 API Key") }
+            }
+            return
+        }
+        testing = true
+        testError = null
+        testOk = false
+        scope.launch {
+            when (val result = OpenAiModelsClient.fetchModels(baseUrl, apiKey)) {
+                is ModelsFetchResult.Success -> {
+                    val lists = result.models
+                    chatOptions = lists.chatModels
+                    asrOptions = lists.asrModels
+                    modelsFetched = true
+                    testOk = true
+                    // Auto-select if current value not in list
+                    if (chatModel.isBlank() || (chatOptions.isNotEmpty() && chatModel !in chatOptions)) {
+                        chatModel = pickPreferredChat(chatOptions) ?: chatModel
+                    }
+                    if (asrModel.isBlank() || (asrOptions.isNotEmpty() && asrModel !in asrOptions &&
+                            !asrOptions.any { it.equals(asrModel, ignoreCase = true) })
+                    ) {
+                        asrModel = pickPreferredAsr(asrOptions) ?: asrModel.ifBlank { "whisper-1" }
+                    }
+                    snackbar.showSnackbar(
+                        "连接成功，发现 ${lists.allIds.size} 个模型" +
+                            "（聊天 ${lists.chatModels.size} / ASR ${lists.asrModels.size}）"
+                    )
+                }
+                is ModelsFetchResult.Failure -> {
+                    testError = result.message
+                    testOk = false
+                    snackbar.showSnackbar(result.message)
+                }
+            }
+            testing = false
+        }
+    }
 
     Scaffold(
         containerColor = bg,
@@ -117,7 +179,7 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             Text(
-                "配置任意 OpenAI 兼容 API（官方、中转、本地 Ollama/vLLM 等）。",
+                "填写 Base URL 与 API Key 后点「测试连接」，自动拉取可用模型列表。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -130,17 +192,34 @@ fun SettingsScreen(
             ) {
                 SettingsField(
                     value = baseUrl,
-                    onValueChange = { baseUrl = it },
+                    onValueChange = {
+                        baseUrl = it
+                        testOk = false
+                        testError = null
+                    },
                     label = "API Base URL",
                     placeholder = "https://api.openai.com/v1"
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = apiKey,
-                    onValueChange = { apiKey = it },
+                    onValueChange = {
+                        apiKey = it
+                        testOk = false
+                        testError = null
+                    },
                     label = { Text("API Key") },
                     placeholder = { Text("sk-…") },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { focus ->
+                            // Optional: auto-fetch when leaving key field with both filled
+                            if (!focus.isFocused && baseUrl.isNotBlank() && apiKey.isNotBlank() &&
+                                !modelsFetched && !testing
+                            ) {
+                                runTestConnection(fromAuto = true)
+                            }
+                        },
                     singleLine = true,
                     shape = RoundedCornerShape(14.dp),
                     visualTransformation = if (showKey) VisualTransformation.None
@@ -164,6 +243,61 @@ fun SettingsScreen(
                     },
                     colors = fieldColors()
                 )
+
+                Spacer(Modifier.height(14.dp))
+
+                OutlinedButton(
+                    onClick = { runTestConnection(fromAuto = false) },
+                    enabled = !testing && baseUrl.isNotBlank() && apiKey.isNotBlank(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    if (testing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("正在测试连接…")
+                    } else {
+                        Icon(
+                            Icons.Outlined.WifiTethering,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("测试连接", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                if (testOk) {
+                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = Teal400,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "连接正常，可从下方列表选择模型",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Teal400
+                        )
+                    }
+                }
+                testError?.let { err ->
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        err,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
 
             Spacer(Modifier.height(16.dp))
@@ -172,17 +306,21 @@ fun SettingsScreen(
                 title = "模型",
                 icon = Icons.Default.ModelTraining
             ) {
-                SettingsField(
-                    value = chatModel,
-                    onValueChange = { chatModel = it },
+                ModelPickerField(
                     label = "翻译模型 (Chat)",
-                    placeholder = "gpt-4o-mini"
+                    value = chatModel,
+                    options = chatOptions,
+                    enabled = !testing,
+                    onValueChange = { chatModel = it },
+                    placeholder = "gpt-4o-mini 或点测试连接拉取"
                 )
                 Spacer(Modifier.height(12.dp))
-                SettingsField(
-                    value = asrModel,
-                    onValueChange = { asrModel = it },
+                ModelPickerField(
                     label = "语音识别模型 (ASR)",
+                    value = asrModel,
+                    options = asrOptions,
+                    enabled = !testing,
+                    onValueChange = { asrModel = it },
                     placeholder = "whisper-1"
                 )
                 Spacer(Modifier.height(12.dp))
@@ -192,6 +330,14 @@ fun SettingsScreen(
                     label = "ASR 端点（可选）",
                     placeholder = "留空 = {Base URL}/audio/transcriptions"
                 )
+                if (modelsFetched) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "列表来自 /models；也可直接输入自定义模型名。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             Spacer(Modifier.height(12.dp))
@@ -219,7 +365,7 @@ fun SettingsScreen(
                 onClick = {
                     onSave(
                         AiProviderConfig(
-                            apiBaseUrl = baseUrl.trim(),
+                            apiBaseUrl = OpenAiModelsClient.normalizeBaseUrl(baseUrl),
                             apiKey = apiKey.trim(),
                             chatModel = chatModel.trim(),
                             asrEndpoint = asrEndpoint.trim(),
@@ -265,9 +411,9 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "• OpenAI：https://api.openai.com/v1 ，gpt-4o-mini / whisper-1\n" +
+                        "• OpenAI：https://api.openai.com/v1\n" +
                             "• 本地 Ollama：http://192.168.x.x:11434/v1\n" +
-                            "• 其他中转：填入提供商 Base URL 与 Key 即可",
+                            "• 测试连接会请求 GET {Base URL}/models",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -275,6 +421,92 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(28.dp))
         }
+    }
+}
+
+private fun pickPreferredChat(options: List<String>): String? {
+    if (options.isEmpty()) return null
+    val preferred = listOf(
+        "gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "gpt-3.5-turbo",
+        "deepseek-chat", "qwen-plus", "claude-3-5-sonnet"
+    )
+    preferred.forEach { p ->
+        options.find { it.equals(p, ignoreCase = true) || it.contains(p, ignoreCase = true) }
+            ?.let { return it }
+    }
+    return options.firstOrNull { it.contains("mini", ignoreCase = true) }
+        ?: options.firstOrNull()
+}
+
+private fun pickPreferredAsr(options: List<String>): String? {
+    if (options.isEmpty()) return null
+    return options.find { it.contains("whisper-1", ignoreCase = true) }
+        ?: options.find { it.contains("whisper", ignoreCase = true) }
+        ?: options.firstOrNull()
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModelPickerField(
+    label: String,
+    value: String,
+    options: List<String>,
+    enabled: Boolean,
+    onValueChange: (String) -> Unit,
+    placeholder: String
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val hasOptions = options.isNotEmpty()
+
+    if (hasOptions) {
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { if (enabled) expanded = !expanded }
+        ) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange, // still allow custom typing
+                label = { Text(label) },
+                placeholder = { Text(placeholder) },
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth(),
+                enabled = enabled,
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp),
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+                colors = fieldColors()
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier.background(MaterialTheme.colorScheme.surface)
+            ) {
+                options.forEach { model ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                model,
+                                fontWeight = if (model == value) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (model == value) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurface
+                            )
+                        },
+                        onClick = {
+                            onValueChange(model)
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
+    } else {
+        SettingsField(
+            value = value,
+            onValueChange = onValueChange,
+            label = label,
+            placeholder = placeholder
+        )
     }
 }
 
