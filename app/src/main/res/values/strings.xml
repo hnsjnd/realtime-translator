@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">实时翻译</string>
+    <string name="notification_channel_name">实时翻译服务</string>
+    <string name="notification_channel_desc">持续录音与翻译时显示</string>
+    <string name="notification_title">实时翻译进行中</string>
+    <string name="notification_text">正在捕获并翻译音频…</string>
+</resources>
