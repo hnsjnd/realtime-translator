@@ -82,6 +82,25 @@ class SettingsRepository(context: Context) {
         )
     }
 
+    /** Cache of last successful GET /models, keyed by normalized base URL. */
+    fun saveModelCache(baseUrl: String, ids: List<String>) {
+        uiPrefs.edit()
+            .putString(KEY_MODEL_CACHE_URL, baseUrl.trim().trimEnd('/'))
+            .putString(KEY_MODEL_CACHE_IDS, org.json.JSONArray(ids).toString())
+            .apply()
+    }
+
+    fun loadModelCache(baseUrl: String): List<String> {
+        val cachedUrl = uiPrefs.getString(KEY_MODEL_CACHE_URL, null) ?: return emptyList()
+        if (cachedUrl != baseUrl.trim().trimEnd('/')) return emptyList()
+        return try {
+            val arr = org.json.JSONArray(uiPrefs.getString(KEY_MODEL_CACHE_IDS, "[]"))
+            List(arr.length()) { arr.getString(it) }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     fun setSourceLang(lang: Language) {
         uiPrefs.edit().putString(KEY_SOURCE_LANG, lang.code).apply()
         _sourceLang.value = lang
@@ -106,6 +125,8 @@ class SettingsRepository(context: Context) {
         private const val KEY_SOURCE_LANG = "source_lang"
         private const val KEY_TARGET_LANG = "target_lang"
         private const val KEY_AUDIO_SOURCE = "audio_source"
+        private const val KEY_MODEL_CACHE_URL = "model_cache_url"
+        private const val KEY_MODEL_CACHE_IDS = "model_cache_ids"
 
         const val DEFAULT_BASE_URL = "https://api.openai.com/v1"
         const val DEFAULT_CHAT_MODEL = "gpt-4o-mini"

@@ -1,6 +1,27 @@
 package com.hnsjnd.realtimetranslator.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.withStyle
+import com.hnsjnd.realtimetranslator.RealtimeTranslatorApp
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -75,19 +96,27 @@ fun SettingsScreen(
     onSave: (AiProviderConfig) -> Unit,
     onBack: () -> Unit
 ) {
-    var baseUrl by remember(config) { mutableStateOf(config.apiBaseUrl) }
-    var apiKey by remember(config) { mutableStateOf(config.apiKey) }
-    var chatModel by remember(config) { mutableStateOf(config.chatModel) }
-    var asrEndpoint by remember(config) { mutableStateOf(config.asrEndpoint) }
-    var asrModel by remember(config) { mutableStateOf(config.asrModel) }
-    var showKey by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val settingsRepo = remember { (context.applicationContext as RealtimeTranslatorApp).settingsRepository }
 
-    var chatOptions by remember { mutableStateOf(listOf<String>()) }
-    var asrOptions by remember { mutableStateOf(listOf<String>()) }
+    // Keyed on Unit (not config) so a save never overwrites what the user is editing/selected
+    var baseUrl by rememberSaveable { mutableStateOf(config.apiBaseUrl) }
+    var apiKey by rememberSaveable { mutableStateOf(config.apiKey) }
+    var chatModel by rememberSaveable { mutableStateOf(config.chatModel) }
+    var asrEndpoint by rememberSaveable { mutableStateOf(config.asrEndpoint) }
+    var asrModel by rememberSaveable { mutableStateOf(config.asrModel) }
+    var showKey by remember { mutableStateOf(false) }
+    var showAllModels by rememberSaveable { mutableStateOf(false) }
+
+    var allModelIds by remember { mutableStateOf(settingsRepo.loadModelCache(config.apiBaseUrl)) }
+    val classified = remember(allModelIds) { OpenAiModelsClient.classifyModels(allModelIds) }
+    val allSorted = remember(allModelIds) { OpenAiModelsClient.sortChat(allModelIds) }
+    val chatOptions = if (showAllModels) allSorted else classified.chatModels
+    val asrOptions = if (showAllModels) allSorted else classified.asrModels
     var testing by remember { mutableStateOf(false) }
     var testError by remember { mutableStateOf<String?>(null) }
     var testOk by remember { mutableStateOf(false) }
-    var modelsFetched by remember { mutableStateOf(false) }
+    val modelsFetched = allModelIds.isNotEmpty()
 
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -108,18 +137,15 @@ fun SettingsScreen(
             when (val result = OpenAiModelsClient.fetchModels(baseUrl, apiKey)) {
                 is ModelsFetchResult.Success -> {
                     val lists = result.models
-                    chatOptions = lists.chatModels
-                    asrOptions = lists.asrModels
-                    modelsFetched = true
+                    allModelIds = lists.allIds
+                    settingsRepo.saveModelCache(baseUrl, lists.allIds)
                     testOk = true
-                    // Auto-select if current value not in list
-                    if (chatModel.isBlank() || (chatOptions.isNotEmpty() && chatModel !in chatOptions)) {
-                        chatModel = pickPreferredChat(chatOptions) ?: chatModel
+                    // Only fill when the current value is empty or clearly not offered by this provider
+                    if (chatModel.isBlank() || chatModel !in lists.allIds) {
+                        pickPreferredChat(lists.chatModels)?.let { chatModel = it }
                     }
-                    if (asrModel.isBlank() || (asrOptions.isNotEmpty() && asrModel !in asrOptions &&
-                            !asrOptions.any { it.equals(asrModel, ignoreCase = true) })
-                    ) {
-                        asrModel = pickPreferredAsr(asrOptions) ?: asrModel.ifBlank { "whisper-1" }
+                    if (asrModel.isBlank() || asrModel !in lists.allIds) {
+                        pickPreferredAsr(lists.asrModels)?.let { asrModel = it }
                     }
                     snackbar.showSnackbar(
                         "连接成功，发现 ${lists.allIds.size} 个模型" +
@@ -196,6 +222,7 @@ fun SettingsScreen(
                         baseUrl = it
                         testOk = false
                         testError = null
+                        allModelIds = settingsRepo.loadModelCache(it)
                     },
                     label = "API Base URL",
                     placeholder = "https://api.openai.com/v1"
@@ -306,6 +333,21 @@ fun SettingsScreen(
                 title = "模型",
                 icon = Icons.Default.ModelTraining
             ) {
+                if (modelsFetched) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "显示全部模型（含图像/语音合成等）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(checked = showAllModels, onCheckedChange = { showAllModels = it })
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
                 ModelPickerField(
                     label = "翻译模型 (Chat)",
                     value = chatModel,
@@ -333,7 +375,7 @@ fun SettingsScreen(
                 if (modelsFetched) {
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "列表来自 /models；也可直接输入自定义模型名。",
+                        "共 ${allModelIds.size} 个模型（聊天 ${classified.chatModels.size} / 语音识别 ${classified.asrModels.size}）。输入可实时筛选，也可填写自定义模型名。",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -445,7 +487,6 @@ private fun pickPreferredAsr(options: List<String>): String? {
         ?: options.firstOrNull()
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ModelPickerField(
     label: String,
@@ -455,58 +496,124 @@ private fun ModelPickerField(
     onValueChange: (String) -> Unit,
     placeholder: String
 ) {
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     var expanded by remember { mutableStateOf(false) }
+    // When true the text is a filter query; after picking an item we show the full list again
+    var filtering by remember { mutableStateOf(false) }
     val hasOptions = options.isNotEmpty()
+    val query = value.trim()
+    val filtered = remember(options, query, filtering) {
+        if (!filtering || query.isEmpty()) options
+        else options.filter { it.contains(query, ignoreCase = true) }
+    }
 
-    if (hasOptions) {
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { if (enabled) expanded = !expanded }
-        ) {
-            OutlinedTextField(
-                value = value,
-                onValueChange = onValueChange, // still allow custom typing
-                label = { Text(label) },
-                placeholder = { Text(placeholder) },
-                modifier = Modifier
-                    .menuAnchor()
-                    .fillMaxWidth(),
-                enabled = enabled,
-                singleLine = true,
-                shape = RoundedCornerShape(14.dp),
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-                colors = fieldColors()
-            )
-            ExposedDropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false },
-                modifier = Modifier.background(MaterialTheme.colorScheme.surface)
-            ) {
-                options.forEach { model ->
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                model,
-                                fontWeight = if (model == value) FontWeight.SemiBold else FontWeight.Normal,
-                                color = if (model == value) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurface
-                            )
-                        },
-                        onClick = {
-                            onValueChange(model)
-                            expanded = false
+    fun close() {
+        expanded = false
+        filtering = false
+        keyboard?.hide()
+        focusManager.clearFocus()
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = {
+                onValueChange(it)
+                filtering = true
+                if (hasOptions) expanded = true
+            },
+            label = { Text(label) },
+            placeholder = { Text(placeholder) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .onFocusChanged { if (!it.isFocused) { expanded = false; filtering = false } },
+            enabled = enabled,
+            singleLine = true,
+            shape = RoundedCornerShape(14.dp),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { close() }),
+            trailingIcon = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (value.isNotEmpty()) {
+                        IconButton(onClick = {
+                            onValueChange("")
+                            filtering = true
+                            if (hasOptions) expanded = true
+                        }) {
+                            Icon(Icons.Default.Close, contentDescription = "清空", modifier = Modifier.size(18.dp))
                         }
+                    }
+                    if (hasOptions) {
+                        IconButton(onClick = {
+                            filtering = false
+                            expanded = !expanded
+                        }) {
+                            Icon(
+                                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = if (expanded) "收起" else "展开模型列表"
+                            )
+                        }
+                    }
+                }
+            },
+            colors = fieldColors()
+        )
+
+        if (expanded && hasOptions) {
+            Spacer(Modifier.height(6.dp))
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = Navy800,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column {
+                    Text(
+                        if (filtered.isEmpty()) "无匹配模型，将使用自定义值「$query」"
+                        else if (filtering && query.isNotEmpty()) "匹配 ${filtered.size} / ${options.size}"
+                        else "共 ${options.size} 个模型",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (filtered.isEmpty()) MaterialTheme.colorScheme.tertiary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                     )
+                    if (filtered.isNotEmpty()) {
+                        LazyColumn(Modifier.heightIn(max = 260.dp)) {
+                            items(filtered, key = { it }) { model ->
+                                val selected = model == value
+                                Text(
+                                    text = highlight(model, if (filtering) query else "", Teal400),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (selected) Teal400 else MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            onValueChange(model)
+                                            close()
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
-    } else {
-        SettingsField(
-            value = value,
-            onValueChange = onValueChange,
-            label = label,
-            placeholder = placeholder
-        )
+    }
+}
+
+private fun highlight(text: String, query: String, color: androidx.compose.ui.graphics.Color): AnnotatedString {
+    if (query.isEmpty()) return AnnotatedString(text)
+    val idx = text.indexOf(query, ignoreCase = true)
+    if (idx < 0) return AnnotatedString(text)
+    return buildAnnotatedString {
+        append(text.substring(0, idx))
+        withStyle(SpanStyle(color = color, fontWeight = FontWeight.Bold)) {
+            append(text.substring(idx, idx + query.length))
+        }
+        append(text.substring(idx + query.length))
     }
 }
 
